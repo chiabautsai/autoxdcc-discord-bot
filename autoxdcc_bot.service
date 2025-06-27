@@ -1,0 +1,18 @@
+[Unit]
+Description=AutoXDCC Discord Bot and Webhook Service
+After=network.target
+
+[Service]
+# Replace 'ubuntu' with your actual username
+User=ubuntu
+Group=ubuntu
+
+# Set the working directory to your project folder
+WorkingDirectory=/home/ubuntu/autoxdcc_bot
+ExecStart=/home/ubuntu/autoxdcc_bot/venv/bin/python main.py
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
