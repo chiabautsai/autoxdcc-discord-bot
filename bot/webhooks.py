@@ -94,7 +94,21 @@ async def receive_search_results(payload: SearchResultPayload):
         
         view = DownloadView(session_id=session_id, choices=payload.choices)
         await interaction.followup.send(embed=embed, view=view)
-    else:
+        # The session remains active for the download buttons
+    
+    # *** THE FIX: Handle the new 'rejected_busy' status ***
+    elif payload.status == "rejected_busy":
+        embed = discord.Embed(
+            title="⚠️ Search Service Busy",
+            description=payload.message,
+            color=discord.Color.orange()
+        )
+        # Send an ephemeral message that only the user who triggered the command can see.
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Clean up the rejected session immediately.
+        bot_module.ACTIVE_SESSIONS.pop(session_id, None)
+
+    else: # This handles the "no_results" case
         embed = discord.Embed(title="⚠️ No Results Found", description=payload.message, color=discord.Color.orange())
         await interaction.followup.send(embed=embed)
         # Clean up the session if there were no results

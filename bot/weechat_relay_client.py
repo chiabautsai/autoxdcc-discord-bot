@@ -5,7 +5,8 @@ import config
 class WeeChatRelayClient:
     """
     A robust, asynchronous client for the WeeChat relay protocol.
-    It correctly handles the handshake, authentication, and command/response cycle.
+    It correctly handles the one-way nature of 'init' and 'input' commands
+    and performs a graceful shutdown.
     """
     def __init__(self):
         self.host = config.WEECHAT_RELAY_HOST
@@ -34,23 +35,41 @@ class WeeChatRelayClient:
         
         return message_data.decode('utf-8', 'ignore').strip()
 
-    def _close(self):
+    async def _close(self):
+        """Gracefully closes the connection by sending 'quit'."""
         if self.writer and not self.writer.is_closing():
-            self.writer.close()
+            try:
+                # The 'quit' command is the polite way to disconnect.
+                await self._send("quit")
+            except Exception:
+                # Ignore errors if the socket is already dead.
+                pass
+            finally:
+                self.writer.close()
             
     async def _perform_full_login(self):
         if not self.password:
             raise ValueError("WeeChat relay password is not set.")
         await self._connect()
+        
+        # 1. Handshake (sends a response)
         await self._send("handshake")
-        await self._receive() # Consume handshake response
+        await self._receive()
+        
+        # 2. Authenticate (is silent, does not send a response)
         await self._send(f"init password={self.password}")
 
     async def run_fire_and_forget_command(self, command: str):
-        """For commands that do not return data (e.g., /autoxdcc commands)."""
+        """
+        Connects, authenticates, sends a one-way command, and gracefully disconnects.
+        """
         try:
             await self._perform_full_login()
+            
+            # Send the main command (is silent, does not send a response)
             full_relay_command = f"input core.weechat {command}"
-            await self._send(f"(ff_cmd) {full_relay_command}")
+            await self._send(f"(cmd) {full_relay_command}")
+            
         finally:
-            self._close()
+            # Always ensure we disconnect gracefully.
+            await self._close()
