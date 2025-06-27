@@ -3,14 +3,24 @@ Description=AutoXDCC Discord Bot and Webhook Service
 After=network.target
 
 [Service]
-# Replace 'ubuntu' with your actual username
+# Define the user and group under which the service will run.
+# Change 'ubuntu' to your desired user if different.
 User=ubuntu
 Group=ubuntu
 
-# Set the working directory to your project folder
-WorkingDirectory=/home/ubuntu/autoxdcc_bot/bot
-ExecStart=/home/ubuntu/autoxdcc_bot/venv/bin/python main.py
+# Set the working directory to the project's root directory.
+# THIS IS THE PRIMARY PATH YOU MAY NEED TO ADJUST
+WorkingDirectory=/home/ubuntu/autoxdcc_bot
 
+# The command to execute the service.
+# - /bin/bash -c "" allows running multiple commands in a sub-shell.
+# - source venv/bin/activate: Activates the Python virtual environment.
+#   This path is now relative to 'WorkingDirectory'.
+# - python bot/main.py: Runs the main application script.
+#   This path is also relative to 'WorkingDirectory'.
+ExecStart=/bin/bash -c "source venv/bin/activate && python bot/main.py"
+
+# Configure restart behavior
 Restart=on-failure
 RestartSec=5s
 
