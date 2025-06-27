@@ -8,7 +8,7 @@ User=ubuntu
 Group=ubuntu
 
 # Set the working directory to your project folder
-WorkingDirectory=/home/ubuntu/autoxdcc_bot
+WorkingDirectory=/home/ubuntu/autoxdcc_bot/bot
 ExecStart=/home/ubuntu/autoxdcc_bot/venv/bin/python main.py
 
 Restart=on-failure
