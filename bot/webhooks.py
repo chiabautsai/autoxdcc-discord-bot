@@ -1,4 +1,3 @@
-# webhooks.py (Corrected with a proper UI Button subclass)
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -19,29 +18,23 @@ class SearchResultPayload(BaseModel):
     message: str
     choices: Optional[List[Choice]] = None
 
-# --- Create a dedicated Button class ---
+# --- Custom Discord UI Component Classes ---
 class DownloadButton(discord.ui.Button):
     def __init__(self, choice_id: int):
-        """A custom button that holds the choice_id."""
         super().__init__(
             label=f"Download {choice_id}",
             style=discord.ButtonStyle.primary,
-            custom_id=str(choice_id) # The custom_id is still the choice_id
+            custom_id=str(choice_id)
         )
     
-    # The callback is now a method of the button itself, which is the correct pattern.
-    # The signature `async def callback(self, interaction: discord.Interaction)` is what discord.py expects.
     async def callback(self, interaction: discord.Interaction):
-        # Acknowledge the button press immediately.
         await interaction.response.defer()
 
-        # The view is accessible via `self.view`.
         session_id = self.view.session_id
         choice_id = self.custom_id
         
         weechat_command = f"/autoxdcc_service_download {session_id} {choice_id}"
         
-        # Disable all buttons in the view after one is clicked.
         for child in self.view.children:
             child.disabled = True
         
@@ -58,7 +51,6 @@ class DownloadButton(discord.ui.Button):
             for field in original_embed.fields:
                 new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
 
-            # Edit the original message with the new embed and the disabled buttons.
             await interaction.edit_original_response(embed=new_embed, view=self.view)
 
         except Exception as e:
@@ -70,14 +62,12 @@ class DownloadButton(discord.ui.Button):
             error_embed.add_field(name="Error Details", value=f"```{e}```")
             await interaction.edit_original_response(embed=error_embed, view=self.view)
         
-        # Stop the view from listening to further interactions.
         self.view.stop()
 
 class DownloadView(discord.ui.View):
     def __init__(self, session_id: str, choices: List[Choice]):
         super().__init__(timeout=300)
         self.session_id = session_id
-        # Add a DownloadButton for each choice.
         for choice in choices:
             self.add_item(DownloadButton(choice_id=choice.choice_id))
 
@@ -87,10 +77,10 @@ app = FastAPI()
 @app.post("/search_results")
 async def receive_search_results(payload: SearchResultPayload):
     session_id = payload.session_id
-    interaction = bot_module.ACTIVE_SEARCHES.pop(session_id, None)
+    interaction = bot_module.ACTIVE_SESSIONS.get(session_id)
     
     if not interaction:
-        print(f"Error: Received results for an unknown session ID: {session_id}")
+        print(f"Error: Received results for an unknown or expired session ID: {session_id}")
         return {"status": "error", "message": "Unknown session ID"}
 
     if payload.status == "success" and payload.choices:
@@ -102,11 +92,12 @@ async def receive_search_results(payload: SearchResultPayload):
         for choice in payload.choices:
             embed.add_field(name=f"Choice {choice.choice_id}: {choice.filename}", value=f"Size: {choice.size}", inline=False)
         
-        # Create our custom view, now passing the choices to it.
         view = DownloadView(session_id=session_id, choices=payload.choices)
         await interaction.followup.send(embed=embed, view=view)
     else:
         embed = discord.Embed(title="⚠️ No Results Found", description=payload.message, color=discord.Color.orange())
         await interaction.followup.send(embed=embed)
+        # Clean up the session if there were no results
+        bot_module.ACTIVE_SESSIONS.pop(session_id, None)
 
     return {"status": "ok"}

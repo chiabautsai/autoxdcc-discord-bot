@@ -4,10 +4,6 @@
 #
 # --- HISTORY ---
 # 2023-10-28: Version 9.0, Added API webhook for frontend communication.
-#                        - On search completion, script now sends results via an HTTP POST request.
-#                        - Added 'api_endpoint_url' to the configuration.
-#                        - Implemented a non-blocking HTTP call using weechat.hook_process and curl.
-#                        - Added a callback to log the success or failure of the API call.
 # 2023-10-27: Version 8.3, Implemented automatic session expiry.
 # 2023-10-27: Version 8.2, Fixed incomplete shutdown cleanup flaw.
 # 2023-10-27: Version 8.1, Fixed ambiguous download flaw.
@@ -28,9 +24,9 @@ SCRIPT_DESC = "Hardened backend service for XDCC search and download with API we
 
 # --- CONFIGURATION ---
 SCRIPT_CONFIG = {
-    "server_name": "YOURSERVERNAME",
-    "search_channel": "YOURCHANNELNAME",
-    "session_timeout": 300000,  # 300,000 ms = 5 minutes
+    "server_name": "YOURSERVER",
+    "search_channel": "YOURCHANNEL",
+    "session_timeout": 300000,
     "api_endpoint_url": "http://localhost:8000/search_results"
 }
 
@@ -47,7 +43,6 @@ def log_error(message):
 
 # --- DATA CLASS ---
 class XDCCSearchSession:
-    # ... (class code remains identical to version 8.3) ...
     def __init__(self, session_id, search_query, search_buffer_ptr):
         self.id = session_id; self.query = search_query; self.buffer_ptr = search_buffer_ptr; self.results = []; self.choices = []
     def add_result(self, result_dict): self.results.append(result_dict)
@@ -74,7 +69,6 @@ class SessionManager:
 
     def start_new_session(self, session_id, query, buffer_ptr):
         if session_id in self._sessions:
-            log_info(f"Warning: A session with ID '{session_id}' already exists. It will be overwritten.")
             self.end_session(session_id)
         session = XDCCSearchSession(session_id, query, buffer_ptr)
         self._sessions[session_id] = session
@@ -111,14 +105,12 @@ class SessionManager:
             session.add_result({ "grabs": int(result_match.group(1)), "size": result_match.group(2).strip(), "filename": result_match.group(3).strip(), "command": result_match.group(4).strip() })
         return weechat.WEECHAT_RC_OK
 
-    # MODIFICATION: This function now sends the results to the frontend via HTTP POST
     def handle_final_processing(self, session_id):
         session = self._sessions.get(session_id)
         if not session: return weechat.WEECHAT_RC_OK
         
         session.generate_choices()
         
-        # Unhook the processing timer, it has served its purpose
         if session_id in self._hooks and 'processing_timer' in self._hooks[session_id]:
             weechat.unhook(self._hooks[session_id].pop('processing_timer'))
 
@@ -127,7 +119,7 @@ class SessionManager:
             log_info(f"Search complete for session {session_id}. No results found.")
             payload["status"] = "no_results"
             payload["message"] = f"Search for '{session.query}' yielded no results."
-            self.end_session(session_id) # End session immediately if no results
+            self.end_session(session_id)
         else:
             timeout_min = SCRIPT_CONFIG['session_timeout'] / 60000
             log_info(f"Search complete for session {session_id}. Found {len(session.choices)} choices.")
@@ -142,20 +134,17 @@ class SessionManager:
         self.send_results_to_frontend(session_id, payload)
         return weechat.WEECHAT_RC_OK
 
-    # MODIFICATION: New function to handle the API call
     def send_results_to_frontend(self, session_id, payload):
         api_url = SCRIPT_CONFIG.get("api_endpoint_url")
         if not api_url:
-            log_error("'api_endpoint_url' is not defined in the script configuration. Cannot send results.")
+            log_error("'api_endpoint_url' is not defined in the script configuration.")
             return
 
         json_payload = json.dumps(payload)
-        # Use shlex.quote for safety, although hook_process is generally safe.
         command = f"curl -X POST -H \"Content-Type: application/json\" --max-time 10 -d {shlex.quote(json_payload)} {api_url}"
         
         log_info(f"Sending results for session {session_id} to {api_url}")
         weechat.hook_process(command, 12000, "global_http_post_cb", session_id)
-
 
     def handle_expiry(self, session_id):
         if session_id in self._sessions:
@@ -163,23 +152,19 @@ class SessionManager:
             self.end_session(session_id)
         return weechat.WEECHAT_RC_OK
         
-    # MODIFICATION: New handler for the HTTP process callback
     def handle_http_post_callback(self, session_id, command, return_code, stdout, stderr):
         if return_code == 0:
             log_info(f"Successfully sent results for session {session_id} to frontend.")
         else:
             log_error(f"Failed to send results for session {session_id} to frontend (RC: {return_code}).")
-            if stderr:
-                log_error(f"API call STDERR: {stderr}")
-            if stdout:
-                log_error(f"API call STDOUT: {stdout}")
+            if stderr: log_error(f"API call STDERR: {stderr}")
+            if stdout: log_error(f"API call STDOUT: {stdout}")
         return weechat.WEECHAT_RC_OK
-
 
     def get_session(self, session_id): return self._sessions.get(session_id)
     def shutdown(self):
         log_info(f"Shutting down. Terminating {len(self._sessions)} active session(s)...")
-        for session_id in list(self._sessions.keys()):
+        for session_id in list(self.keys()):
             self.end_session(session_id)
 
 # --- SINGLETON INSTANCE ---
@@ -188,10 +173,8 @@ SESSION_MANAGER = SessionManager()
 # --- GLOBAL CALLBACKS ---
 def global_signal_cb(data, signal, signal_data): SESSION_MANAGER.handle_signal(data, signal_data); return weechat.WEECHAT_RC_OK
 def global_final_processing_cb(data, rem): SESSION_MANAGER.handle_final_processing(data); return weechat.WEECHAT_RC_OK
-def global_expiry_cb(data, remaining_calls): SESSION_MANAGER.handle_expiry(data); return weechat.WEECHAT_RC_OK
-# MODIFICATION: New trampoline for the HTTP POST callback
-def global_http_post_cb(data, command, return_code, stdout, stderr): SESSION_MANAGER.handle_http_post_callback(data, command, return_code, stdout, stderr); return weechat.WEECHAT_RC_OK
-
+def global_expiry_cb(data, rem_calls): SESSION_MANAGER.handle_expiry(data); return weechat.WEECHAT_RC_OK
+def global_http_post_cb(data, cmd, rc, out, err): SESSION_MANAGER.handle_http_post_callback(data, cmd, rc, out, err); return weechat.WEECHAT_RC_OK
 
 # --- WEECHAT COMMANDS ---
 def find_buffer_case_insensitive(plugin, name):
@@ -223,7 +206,7 @@ def service_download_cb(data, buffer, args):
         log_info(f"Executing download for session {session_id}, choice {choice_id}: {command_to_run}")
         weechat.command(session.buffer_ptr, command_to_run)
         log_info(f"Session {session_id} has ended.")
-        SESSION_MANAGER.end_session(session_id) # End session on successful download
+        SESSION_MANAGER.end_session(session_id)
     else: log_info(f"Error: Invalid choice_id '{choice_id}' for session {session_id}.")
     return weechat.WEECHAT_RC_OK
 

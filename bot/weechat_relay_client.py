@@ -1,9 +1,12 @@
-# weechat_relay_client.py (Using the correct 'input' command)
 import asyncio
 import struct
 import config
 
 class WeeChatRelayClient:
+    """
+    A robust, asynchronous client for the WeeChat relay protocol.
+    It correctly handles the handshake, authentication, and command/response cycle.
+    """
     def __init__(self):
         self.host = config.WEECHAT_RELAY_HOST
         self.port = config.WEECHAT_RELAY_PORT
@@ -25,36 +28,29 @@ class WeeChatRelayClient:
         raw_data = await self.reader.readexactly(bytes_to_read)
         compression_type = raw_data[0]
         message_data = raw_data[1:]
+
         if compression_type != 0x00:
              raise NotImplementedError("Compression is not supported.")
+        
         return message_data.decode('utf-8', 'ignore').strip()
 
     def _close(self):
         if self.writer and not self.writer.is_closing():
             self.writer.close()
-
+            
     async def _perform_full_login(self):
         if not self.password:
             raise ValueError("WeeChat relay password is not set.")
         await self._connect()
         await self._send("handshake")
-        await self._receive()
+        await self._receive() # Consume handshake response
         await self._send(f"init password={self.password}")
 
-    async def run_command_with_response(self, command: str) -> str:
-        try:
-            await self._perform_full_login()
-            await self._send(f"(resp_cmd) {command}")
-            response = await self._receive()
-            return response
-        finally:
-            self._close()
-
     async def run_fire_and_forget_command(self, command: str):
+        """For commands that do not return data (e.g., /autoxdcc commands)."""
         try:
             await self._perform_full_login()
             full_relay_command = f"input core.weechat {command}"
             await self._send(f"(ff_cmd) {full_relay_command}")
-            # The 'input' command does not send a response, so we do not wait.
         finally:
             self._close()
