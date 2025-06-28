@@ -3,8 +3,11 @@
 # autoxdcc_modular.py - WeeChat backend service for XDCC searching and downloading.
 #
 # --- HISTORY ---
-# 2023-10-29: Version 9.9, Integrated WeeChat's built-in config system for adaptability.
-#             Replaced hardcoded values with configurable options and applied redactions.
+# 2023-10-29: Version 0.1 (New versioning system: all prior versions are alpha).
+#             Integrated WeeChat's built-in config system.
+#             Refactored webhook sending to be generic for multiple endpoints.
+#             Added specific webhook calls for session expiry and download status.
+# 2023-10-29: Version 0.2. Enhanced download status messages with filename/choice_id.
 #
 
 import weechat
@@ -15,9 +18,9 @@ import json
 # --- SCRIPT METADATA ---
 SCRIPT_NAME = "autoxdcc_modular"
 SCRIPT_AUTHOR = "Me"
-SCRIPT_VERSION = "9.9" # Updated version for config system integration
+SCRIPT_VERSION = "0.2" # Auto-bumped version
 SCRIPT_LICENSE = "MIT"
-SCRIPT_DESC = "Final hardened backend service with robust parsing and locking, now configurable."
+SCRIPT_DESC = "Robust XDCC backend service with dynamic config, advanced parsing, locking, and comprehensive Discord feedback."
 
 # --- CONFIGURATION DEFAULTS ---
 # These are the default values for the plugin's configuration options.
@@ -26,7 +29,7 @@ DEFAULT_CONFIG_VALUES = {
     "irc_server_name": "irc.example.org", # Placeholder for the IRC server
     "irc_search_channel": "#channel",     # Placeholder for the IRC channel where search is performed
     "session_timeout": "300000",          # Session timeout in milliseconds (5 minutes)
-    "api_endpoint_url": "http://localhost:8000/search_results" # URL for the Discord bot's webhook
+    "discord_api_base_url": "http://localhost:8000/" # Base URL for the Discord bot's webhook receiver
 }
 
 # --- REGEX CONSTANTS (FINAL, CORRECTED VERSIONS) ---
@@ -69,41 +72,39 @@ class XDCCSearchSession:
             choice_id = int(choice_id)
             target_choice = next((c for c in self.choices if c['choice_id'] == choice_id), None)
             if not target_choice:
-                return None # Choice ID not found
+                return None, None # Return None for command and filename if choice ID not found
             
             target_filename = target_choice['filename']
             # Find the original result with the highest grabs for this filename
-            # (assuming results are still sorted or re-sort if necessary)
             self.results.sort(key=lambda x: x['grabs'], reverse=True) # Ensure sorted
             target_result = next((r for r in self.results if r['filename'] == target_filename), None)
             
-            return target_result['command'] if target_result else None
+            return target_result['command'] if target_result else None, target_filename
         except (ValueError, IndexError):
-            return None # Invalid choice_id format or out of range
+            return None, None # Invalid choice_id format or out of range
 
 # --- MANAGER CLASS ---
 class SessionManager:
     def __init__(self):
         self._sessions = {} # Stores active XDCCSearchSession objects
-        self._hooks = {}    # Stores WeeChat hook pointers (print, timers) for each session
+        self._hooks = {}    # Stores WeeChat hook pointers (print, timers)
         self.is_search_active = False # Global lock for search
         self.irc_server_name = ""
         self.irc_search_channel = ""
         self.session_timeout = 0
-        self.api_endpoint_url = ""
+        self.discord_api_base_url = ""
     
     def load_config_values(self):
         """Loads configuration values from WeeChat's config system."""
         self.irc_server_name = weechat.config_get_plugin("irc_server_name")
         self.irc_search_channel = weechat.config_get_plugin("irc_search_channel")
-        # Ensure session_timeout is an integer
         try:
             self.session_timeout = int(weechat.config_get_plugin("session_timeout"))
         except ValueError:
             log_error("Invalid 'session_timeout' config value. Using default 300000ms.")
-            self.session_timeout = 300000 # Fallback default
-        self.api_endpoint_url = weechat.config_get_plugin("api_endpoint_url")
-        log_info(f"Configuration loaded: Server='{self.irc_server_name}', Channel='{self.irc_search_channel}', Timeout='{self.session_timeout}ms'")
+            self.session_timeout = 300000
+        self.discord_api_base_url = weechat.config_get_plugin("discord_api_base_url")
+        log_info(f"Configuration loaded: Server='{self.irc_server_name}', Channel='{self.irc_search_channel}', Timeout='{self.session_timeout}ms', Discord API Base='{self.discord_api_base_url}'")
 
 
     def start_new_session(self, session_id, query):
@@ -115,7 +116,7 @@ class SessionManager:
         if not server_buffer_ptr:
             log_error(f"Could not find server buffer for '{self.irc_server_name}'. Please check server name in config.")
             self.end_session(session_id)
-            self.release_search_lock() # Release lock if server not found
+            self.release_search_lock()
             self.send_error_to_frontend(session_id, f"Error: IRC server '{self.irc_server_name}' not found or connected.")
             return
 
@@ -124,18 +125,17 @@ class SessionManager:
         if not channel_buffer_ptr:
             log_error(f"Could not find channel buffer '{full_channel_name}'. Please ensure you are joined to the channel.")
             self.end_session(session_id)
-            self.release_search_lock() # Release lock if channel not found
+            self.release_search_lock()
             self.send_error_to_frontend(session_id, f"Error: IRC channel '{self.irc_search_channel}' not found or joined.")
             return
         
-        # Hook print for the server buffer to catch notices from the XDCC bot
         self._hooks[session_id] = {'print_hook': weechat.hook_print(server_buffer_ptr, "irc_notice", "", 0, "global_print_cb", session_id)}
         weechat.command(channel_buffer_ptr, f"!search {query}")
 
     def end_session(self, session_id):
         if session_id in self._hooks:
             for hook_ptr in self._hooks[session_id].values():
-                if hook_ptr: # Ensure hook_ptr is not None before unhooking
+                if hook_ptr:
                     weechat.unhook(hook_ptr)
             self._hooks.pop(session_id)
         if session_id in self._sessions:
@@ -150,7 +150,6 @@ class SessionManager:
     def handle_print_callback(self, session_id, message):
         session = self._sessions.get(session_id)
         if not session:
-            # If session is already ended, just ignore.
             return weechat.WEECHAT_RC_OK
 
         clean_text = weechat.string_remove_color(message, "")
@@ -167,19 +166,15 @@ class SessionManager:
         
         if end_match_obj:
             log_info(f"End of results detected for session {session_id}.")
-            # Unhook the print hook immediately
             if 'print_hook' in self._hooks[session_id] and self._hooks[session_id]['print_hook']:
                 weechat.unhook(self._hooks[session_id].pop('print_hook'))
             
-            # Set up a short timer for final processing to ensure all lines are received
             self._hooks[session_id]['processing_timer'] = weechat.hook_timer(500, 0, 1, "global_final_processing_cb", session_id)
-            # Set up an expiry timer for the session
             self._hooks[session_id]['expiry_timer'] = weechat.hook_timer(self.session_timeout, 0, 1, "global_expiry_cb", session_id)
         
         return weechat.WEECHAT_RC_OK
 
     def handle_final_processing(self, session_id):
-        # Release the lock as soon as search results parsing is complete
         self.release_search_lock() 
         
         session = self._sessions.get(session_id)
@@ -187,7 +182,6 @@ class SessionManager:
             log_error(f"handle_final_processing called for ended session {session_id}.");
             return weechat.WEECHAT_RC_OK
             
-        # Unhook the processing timer immediately after it fires
         if 'processing_timer' in self._hooks.get(session_id, {}):
             if self._hooks[session_id]['processing_timer']:
                 weechat.unhook(self._hooks[session_id].pop('processing_timer'))
@@ -197,57 +191,64 @@ class SessionManager:
         payload = {"session_id": session_id}
         if not session.choices:
             payload.update({"status": "no_results", "message": f"Search for '{session.query}' yielded no results."})
-            self.end_session(session_id) # End session immediately if no results
+            self.end_session(session_id)
         else:
             payload.update({"status": "success", "message": f"Found {len(session.choices)} choices.", "choices": session.choices})
         
-        self.send_results_to_frontend(payload)
+        self.send_webhook_to_frontend("search_results", payload)
+
         return weechat.WEECHAT_RC_OK
 
-    def send_rejection_to_frontend(self, session_id):
-        payload = {"session_id": session_id, "status": "rejected_busy", "message": "Another search is already in progress. Please try again."}
-        self.send_results_to_frontend(payload)
-
-    def send_error_to_frontend(self, session_id, error_message):
-        payload = {"session_id": session_id, "status": "error", "message": error_message}
-        self.send_results_to_frontend(payload)
-
-    def send_results_to_frontend(self, payload):
-        if not self.api_endpoint_url:
-            log_error("'api_endpoint_url' is not defined in WeeChat configuration. Cannot send results.")
+    def send_webhook_to_frontend(self, endpoint: str, payload: dict):
+        if not self.discord_api_base_url:
+            log_error("'discord_api_base_url' is not defined. Cannot send webhook.")
             return
 
+        api_url = f"{self.discord_api_base_url.rstrip('/')}/{endpoint.lstrip('/')}"
         json_payload = json.dumps(payload)
-        # Using shlex.quote to properly quote the JSON payload for the shell command
-        command = f"curl -X POST -H \"Content-Type: application/json\" --max-time 10 -d {shlex.quote(json_payload)} {self.api_endpoint_url}"
-        log_info(f"Sending payload for session {payload['session_id']} to {self.api_endpoint_url}")
-        weechat.hook_process(command, 12000, "global_http_post_cb", payload['session_id'])
+        command = f"curl -X POST -H \"Content-Type: application/json\" --max-time 10 -d {shlex.quote(json_payload)} {api_url}"
+        log_info(f"Sending webhook for session {payload.get('session_id', 'N/A')} to {api_url}")
+        weechat.hook_process(command, 12000, "global_http_post_cb", payload.get('session_id', 'N/A'))
+
+    def send_session_expired_to_frontend(self, session_id: str):
+        payload = {"session_id": session_id, "status": "expired", "message": "This search session has expired due to inactivity."}
+        self.send_webhook_to_frontend("session_expired", payload)
+
+    def send_download_status_to_frontend(self, session_id: str, status: str, message: str):
+        payload = {"session_id": session_id, "status": status, "message": message}
+        self.send_webhook_to_frontend("download_status", payload)
+
+    def send_rejection_to_frontend(self, session_id: str):
+        payload = {"session_id": session_id, "status": "rejected_busy", "message": "Another search is already in progress. Please try again."}
+        self.send_webhook_to_frontend("search_results", payload)
+
+    def send_error_to_frontend(self, session_id: str, error_message: str):
+        payload = {"session_id": session_id, "status": "error", "message": error_message}
+        self.send_webhook_to_frontend("search_results", payload)
+
 
     def handle_expiry(self, session_id):
         if session_id in self._sessions:
-            log_info(f"Session '{session_id}' has expired and will be terminated.");
-            # Send an expiration message to frontend if desired, before ending session
-            # self.send_error_to_frontend(session_id, "Session expired due to inactivity.")
+            log_info(f"Session '{session_id}' has expired and will be terminated.")
+            self.send_session_expired_to_frontend(session_id)
             self.end_session(session_id)
         return weechat.WEECHAT_RC_OK
         
     def handle_http_post_callback(self, session_id, command, return_code, stdout, stderr):
         if return_code != 0:
-            log_error(f"Failed to send results for session {session_id} to frontend (RC: {return_code}).")
-            log_error(f"Curl stderr: {stderr.strip()}") # Log stderr for debugging
+            log_error(f"Failed to send webhook for session {session_id} (RC: {return_code}).")
+            log_error(f"Curl stderr: {stderr.strip()}")
         else:
-            log_info(f"Results for session {session_id} sent successfully.")
+            log_info(f"Webhook for session {session_id} sent successfully.")
         return weechat.WEECHAT_RC_OK
 
     def get_session(self, session_id):
-        """Helper to retrieve a session."""
         return self._sessions.get(session_id)
 
     def shutdown(self):
         log_info(f"Shutting down. Terminating {len(self._sessions)} active session(s)...")
         for session_id in list(self._sessions.keys()):
             self.end_session(session_id)
-        # Ensure lock is released on shutdown
         self.release_search_lock()
 
 # Instantiate the SessionManager globally
@@ -295,24 +296,26 @@ def service_download_cb(data, buffer, args):
     
     session = SESSION_MANAGER.get_session(session_id)
     if not session:
-        log_info(f"Error: Session '{session_id}' is invalid or has expired for download request.");
-        # Potentially send error back to frontend if session is truly gone
+        log_info(f"Error: Session '{session_id}' is invalid or has expired for download request.")
+        SESSION_MANAGER.send_download_status_to_frontend(session_id, "error", "Download failed: Session expired on backend. Please search again.")
         return weechat.WEECHAT_RC_OK
     
-    command_to_run = session.get_download_command(choice_id_str) # Pass as string, method handles int conversion
-    if command_to_run:
+    command_to_run, target_filename = session.get_download_command(choice_id_str) # NOW RETURNS FILENAME TOO
+    if command_to_run and target_filename: # Check both
         full_channel_name = f"{SESSION_MANAGER.irc_server_name}.{SESSION_MANAGER.irc_search_channel}"
         channel_buffer_ptr = weechat.buffer_search("irc", full_channel_name)
         if channel_buffer_ptr:
             log_info(f"Executing download for session {session_id}, choice {choice_id_str}: {command_to_run}")
             weechat.command(channel_buffer_ptr, command_to_run)
-            SESSION_MANAGER.end_session(session_id) # End session after sending download command
+            SESSION_MANAGER.send_download_status_to_frontend(session_id, "success", f"Download command for **`{target_filename}`** (Choice #{choice_id_str}) sent to IRC.") # ENHANCED MESSAGE
+            SESSION_MANAGER.end_session(session_id)
         else:
             log_error(f"Could not find channel buffer '{full_channel_name}' to send download for session {session_id}.")
-            SESSION_MANAGER.send_error_to_frontend(session_id, f"Error: WeeChat could not find the IRC channel '{full_channel_name}' to send download command.")
+            SESSION_MANAGER.send_download_status_to_frontend(session_id, "error", f"Download failed: WeeChat could not find the IRC channel '{full_channel_name}'.")
     else:
-        log_info(f"Error: Invalid choice_id '{choice_id_str}' for session {session_id} (or command not found).")
-        SESSION_MANAGER.send_error_to_frontend(session_id, f"Error: Invalid choice ID '{choice_id_str}' for session '{session_id}'.")
+        log_info(f"Error: Invalid choice_id '{choice_id_str}' for session {session_id}.")
+        SESSION_MANAGER.send_download_status_to_frontend(session_id, "error", f"Download failed: Invalid choice ID '{choice_id_str}'. Please select from available options.") # ENHANCED MESSAGE
+
     return weechat.WEECHAT_RC_OK
 
 # --- Script Initialization ---
@@ -376,5 +379,5 @@ if __name__ == "__main__":
             "service_download_cb", # Callback function name
             "" # Callback data
         )
-        log_info("Autoxdcc WeeChat backend (v9.9) loaded. Configuration is now managed via WeeChat's config system.")
+        log_info(f"Autoxdcc WeeChat backend (v{SCRIPT_VERSION}) loaded. Configuration is now managed via WeeChat's config system.")
         log_info("You can view/change settings with: /set plugins.var.python.autoxdcc_modular.*")
