@@ -8,5 +8,6 @@ DEFAULT_CONFIG_VALUES = {
     "irc_search_channel": "#channel",
     "session_timeout": "300000",        # milliseconds
     "discord_api_base_url": "http://localhost:8000/",
-    "hot_list_completion_delay": "2000" # milliseconds
+    "hot_list_completion_delay": "2000", # milliseconds
+    "log_level": "info"                 # NEW: Log verbosity (debug, info, warning, error, none)
 }

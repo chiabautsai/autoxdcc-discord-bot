@@ -3,115 +3,116 @@
 # autoxdcc.py - Main entry point for the modular AutoXDCC WeeChat backend.
 #
 # --- HISTORY ---
-# 2023-10-30: Version 0.3.1. Bugfix - Re-added the 'send_download_status_to_frontend'.
-# 2023-10-31: Version 0.4.0. Major Refactor - Transitioned to modular design with libautoxdcc.
-#             This file now acts as a thin wrapper, delegating most logic to imported modules.
+# 2023-10-31: Version 0.4.0. Major Refactor - Transitioned to modular design.
+# 2025-06-29: Version 0.5.0. Added configurable logging levels.
 #
 
 import weechat
 import sys
 import os
 
-# --- IMPORTANT: Add the directory containing libautoxdcc to sys.path ---
-# This ensures that our sub-modules can be imported.
-# It assumes autoxdcc.py and libautoxdcc/ are siblings within the
-# directory that is symlinked to WeeChat's python script path.
+# Add the directory containing libautoxdcc to sys.path
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# Check if script_dir is already in sys.path to avoid duplicates
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-# --- Import core modules from our new library ---
-# These imports will be unresolved until you create the files in libautoxdcc/
-# This is expected for now.
-from libautoxdcc import config, utils, models, irc_parser, webhook_sender, session_manager
+# --- MODIFIED: Import logger instance directly ---
+from libautoxdcc import config, models, webhook_sender, session_manager
+from libautoxdcc.utils import logger
 
 # --- SCRIPT METADATA ---
-SCRIPT_NAME = "autoxdcc" # New script name, without "_modular"
+SCRIPT_NAME = "autoxdcc"
 SCRIPT_AUTHOR = "Me"
-SCRIPT_VERSION = "0.4.0" # Major version bump for modularization
+SCRIPT_VERSION = "0.5.0" # Version bump for new feature
 SCRIPT_LICENSE = "MIT"
-SCRIPT_DESC = "Modular WeeChat backend service for XDCC searching, hot lists, and downloading."
+SCRIPT_DESC = "Modular WeeChat backend with configurable logging."
 
 # --- GLOBAL SESSION MANAGER INSTANCE ---
-# This will be instantiated after config is loaded.
-# It's defined here globally as WeeChat's callbacks need a consistent reference.
 SESSION_MANAGER = None
 
 # --- GLOBAL CALLBACKS ---
-# These functions are called by WeeChat directly, so they must be global.
-# They will delegate their actual logic to the SESSION_MANAGER instance.
-
+# These now just check if the session manager exists before delegating.
 def global_print_cb(data, buffer, date, tags, displayed, highlight, prefix, message):
-    """WeeChat print hook callback for IRC messages."""
-    return SESSION_MANAGER.handle_print_callback(data, message)
+    if SESSION_MANAGER: return SESSION_MANAGER.handle_print_callback(data, message)
+    return weechat.WEECHAT_RC_OK
 
 def global_final_processing_cb(data, remaining_calls):
-    """Timer callback for processing search/hot list results."""
-    return SESSION_MANAGER.handle_final_processing(data)
+    if SESSION_MANAGER: return SESSION_MANAGER.handle_final_processing(data)
+    return weechat.WEECHAT_RC_OK
 
 def global_expiry_cb(data, remaining_calls):
-    """Timer callback for session expiry."""
-    return SESSION_MANAGER.handle_expiry(data)
+    if SESSION_MANAGER: return SESSION_MANAGER.handle_expiry(data)
+    return weechat.WEECHAT_RC_OK
 
 def global_http_post_cb(data, cmd, rc, out, err):
-    """Process hook callback for curl HTTP POST requests."""
-    return SESSION_MANAGER.handle_http_post_callback(data, cmd, rc, out, err)
-
+    if SESSION_MANAGER: return SESSION_MANAGER.handle_http_post_callback(data, cmd, rc, out, err)
+    return weechat.WEECHAT_RC_OK
 
 # --- WEECHAT COMMAND HANDLERS ---
-# These functions are called by WeeChat when a command is typed.
-# They will delegate their actual logic to the SESSION_MANAGER instance.
-
 def service_search_cb(data, buffer, args):
-    """Handles the /autoxdcc_service_search command."""
-    return session_manager.service_search_cb(data, buffer, args, SESSION_MANAGER)
+    if SESSION_MANAGER: return session_manager.service_search_cb(data, buffer, args, SESSION_MANAGER)
+    logger.error("SESSION_MANAGER not initialized for search command.")
+    return weechat.WEECHAT_RC_ERROR
 
 def service_hot_cb(data, buffer, args):
-    """Handles the /autoxdcc_service_hot command."""
-    return session_manager.service_hot_cb(data, buffer, args, SESSION_MANAGER)
+    if SESSION_MANAGER: return session_manager.service_hot_cb(data, buffer, args, SESSION_MANAGER)
+    logger.error("SESSION_MANAGER not initialized for hot command.")
+    return weechat.WEECHAT_RC_ERROR
 
 def service_download_cb(data, buffer, args):
-    """Handles the /autoxdcc_service_download command."""
-    return session_manager.service_download_cb(data, buffer, args, SESSION_MANAGER)
-
+    if SESSION_MANAGER: return session_manager.service_download_cb(data, buffer, args, SESSION_MANAGER)
+    logger.error("SESSION_MANAGER not initialized for download command.")
+    return weechat.WEECHAT_RC_ERROR
 
 # --- INITIALIZATION AND SHUTDOWN ---
-
 def setup_plugin():
-    """Initializes plugin configuration and loads settings into the session manager."""
-    utils.log_info("Setting up plugin configuration options...")
+    """Initializes plugin configuration and the session manager."""
+    # --- MODIFIED: Set up logger first ---
+    logger.info("Setting up plugin configuration options...")
     for name, default_value in config.DEFAULT_CONFIG_VALUES.items():
         if not weechat.config_is_set_plugin(name):
             weechat.config_set_plugin(name, default_value)
-            utils.log_info(f"  Set default for '{name}' to: '{default_value}'")
-    utils.log_info("Plugin configuration setup complete.")
+            logger.debug(f"  Set default for '{name}' to: '{default_value}'")
+    
+    # --- MODIFIED: Set the logger's level based on the loaded config ---
+    log_level_config = weechat.config_get_plugin("log_level")
+    logger.set_level(log_level_config)
 
     global SESSION_MANAGER
-    SESSION_MANAGER = session_manager.SessionManager(
-        irc_server_name=weechat.config_get_plugin("irc_server_name"),
-        irc_search_channel=weechat.config_get_plugin("irc_search_channel"),
-        session_timeout=int(weechat.config_get_plugin("session_timeout")),
-        discord_api_base_url=weechat.config_get_plugin("discord_api_base_url"),
-        hot_list_completion_delay=int(weechat.config_get_plugin("hot_list_completion_delay"))
-    )
-    utils.log_info(f"SessionManager initialized with config. Timeout='{SESSION_MANAGER.session_timeout}ms', HotListDelay='{SESSION_MANAGER.hot_list_completion_delay}ms'")
-
+    try:
+        SESSION_MANAGER = session_manager.SessionManager(
+            irc_server_name=weechat.config_get_plugin("irc_server_name"),
+            irc_search_channel=weechat.config_get_plugin("irc_search_channel"),
+            session_timeout=int(weechat.config_get_plugin("session_timeout")),
+            discord_api_base_url=weechat.config_get_plugin("discord_api_base_url"),
+            hot_list_completion_delay=int(weechat.config_get_plugin("hot_list_completion_delay"))
+        )
+        # --- MODIFIED: Use new logger ---
+        logger.debug(f"SessionManager initialized.")
+    except Exception as e:
+        # --- MODIFIED: Use new logger ---
+        logger.error(f"Failed to initialize SessionManager: {e}. Plugin will not function.")
+        return weechat.WEECHAT_RC_ERROR
 
 def shutdown_cb():
     """Callback when the script is unloaded by WeeChat."""
     if SESSION_MANAGER:
         SESSION_MANAGER.shutdown()
-    utils.log_info(f"{SCRIPT_NAME} unloaded.")
+    # --- MODIFIED: Use new logger ---
+    logger.info(f"{SCRIPT_NAME} unloaded.")
     return weechat.WEECHAT_RC_OK
 
 
 if __name__ == "__main__":
     if weechat.register(SCRIPT_NAME, SCRIPT_AUTHOR, SCRIPT_VERSION, SCRIPT_LICENSE, SCRIPT_DESC, "shutdown_cb", ""):
-        setup_plugin()
-        # Register commands
-        weechat.hook_command("autoxdcc_service_search", "Starts an XDCC search", "", "", "", "service_search_cb", "")
-        weechat.hook_command("autoxdcc_service_hot", "Starts a hot files listing", "", "", "", "service_hot_cb", "")
-        weechat.hook_command("autoxdcc_service_download", "Downloads a file by choice ID", "", "", "", "service_download_cb", "")
-        utils.log_info(f"AutoXDCC WeeChat backend (v{SCRIPT_VERSION}) loaded and ready.")
-        utils.log_info("You can view/change settings with: /set plugins.var.python.autoxdcc.*") # Note the name change
+        if setup_plugin() != weechat.WEECHAT_RC_ERROR:
+            # Register commands only if initialization was successful
+            weechat.hook_command("autoxdcc_service_search", "Starts an XDCC search", "", "", "", "service_search_cb", "")
+            weechat.hook_command("autoxdcc_service_hot", "Starts a hot files listing", "", "", "", "service_hot_cb", "")
+            weechat.hook_command("autoxdcc_service_download", "Downloads a file by choice ID", "", "", "", "service_download_cb", "")
+            # --- MODIFIED: Use new logger ---
+            logger.info(f"AutoXDCC WeeChat backend (v{SCRIPT_VERSION}) loaded and ready.")
+            logger.info("You can view/change settings with: /set plugins.var.python.autoxdcc.*")
+        else:
+            # Use weechat.prnt directly here as the logger might be the cause of failure
+            weechat.prnt("", f"{weechat.color('chat_prefix_error')}[{SCRIPT_NAME}] Plugin initialization failed. Check logs for details.")
