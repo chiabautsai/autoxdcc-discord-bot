@@ -74,12 +74,16 @@ class SearchHotItemButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
+        
+        # --- THE FIX: Stop the HotFilterView to prevent its on_timeout from firing later ---
+        self.view.stop()
+
         for child in self.view.children:
             child.disabled = True
         
         new_embed = discord.Embed(
             title="🔍 Search Initiated",
-            description=f"Handing off to search service for:\n**`{self.filename_to_search}`**",
+            description=f"Handing off to search service for:\n**`{self.filename_to_search}`**\n\nI will edit this message with the results.",
             color=discord.Color.blue()
         )
         await interaction.edit_original_response(embed=new_embed, view=self.view)
@@ -152,16 +156,12 @@ class HotFilterView(discord.ui.View):
         dropdown.callback = self.on_category_select
         return dropdown
     
-    # --- NEW METHOD: Builds the embed based on current state ---
     def _build_embed_for_current_state(self) -> discord.Embed:
         """Constructs the embed with items for the currently selected category."""
-        # Use the original interaction's initial embed title, or a default if not available
         initial_embed = self.original_interaction.message.embeds[0] if self.original_interaction.message and self.original_interaction.message.embeds else None
         
         title = initial_embed.title if initial_embed else "🔥 Top Trending Files"
         
-        # Use the summary text from the initial payload if available, or a generic one
-        # This assumes the summary is included in the initial message's description
         summary_description_part = ""
         if initial_embed and initial_embed.description and "\n\n" in initial_embed.description:
             summary_description_part = initial_embed.description.split("\n\n")[0] + "\n\n"
@@ -186,9 +186,8 @@ class HotFilterView(discord.ui.View):
         """Callback for category selection."""
         await interaction.response.defer()
         self.current_category = interaction.data["values"][0]
-        self.update_components() # Rebuilds buttons based on new category/state
+        self.update_components()
 
-        # --- MODIFIED: Call the new _build_embed_for_current_state method ---
         new_embed = self._build_embed_for_current_state()
         
         await self.original_interaction.edit_original_response(embed=new_embed, view=self)
@@ -213,7 +212,6 @@ class DownloadButton(discord.ui.Button):
     
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
-
         session_id = self.view.session_id
         choice_id = self.custom_id
         
@@ -287,21 +285,17 @@ async def receive_hot_results(payload: HotResultPayload):
 
     try:
         if payload.status == "success" and payload.items:
-            # --- MODIFIED: Prepare summary for embed description ---
             summary_description_part = ""
             if payload.summary:
                 summary_description_part = payload.summary.replace(" ¦ ", "\n") + "\n\n"
             
-            # Create the view. The view will build its initial embed
             view = HotFilterView(original_interaction=interaction, hot_items=payload.items)
             
-            # --- MODIFIED: Get the initial embed from the view ---
             initial_embed = view._build_embed_for_current_state()
-            # Ensure the initial embed also has the dynamic summary from payload
             initial_embed.description = f"{summary_description_part}Click a search button to download, or 'Details' for media info."
 
-            await interaction.edit_original_response(embed=initial_embed, view=view) # Use the embed built by the view
-        else: # Handles "no_results" or other errors from WeeChat
+            await interaction.edit_original_response(embed=initial_embed, view=view)
+        else:
             embed = discord.Embed(
                 title="⚠️ No Hot Files Found",
                 description=payload.message or "The backend returned no trending files.",
@@ -345,13 +339,12 @@ async def receive_search_results(payload: SearchResultPayload):
             await interaction.edit_original_response(embed=embed, view=None)
             bot_module.ACTIVE_SESSIONS.pop(session_id, None)
 
-        else: # This handles "no_results" or other startup errors from WeeChat
+        else:
             embed = discord.Embed(title="⚠️ No Results Found", description=payload.message, color=discord.Color.orange())
             await interaction.edit_original_response(embed=embed, view=None)
             bot_module.ACTIVE_SESSIONS.pop(session_id, None)
 
     except discord.errors.NotFound:
-        print(f"Error editing original response for session {session_id}. Message was likely deleted by a user.")
         bot_module.ACTIVE_SESSIONS.pop(session_id, None)
 
     return {"status": "ok"}
@@ -362,7 +355,7 @@ async def receive_session_expired(payload: SessionStatusPayload):
     interaction = bot_module.ACTIVE_SESSIONS.get(session_id)
 
     if not interaction:
-        return {"status": "ignored", "message": "Session already handled or unknown."}
+        return {"status": "ignored"}
 
     try:
         new_embed = discord.Embed(
@@ -371,12 +364,8 @@ async def receive_session_expired(payload: SessionStatusPayload):
             color=discord.Color.dark_orange()
         )
         await interaction.edit_original_response(embed=new_embed, view=None)
-        print(f"Session {session_id} expired. Discord message updated and buttons disabled.")
-
     except discord.errors.NotFound:
-        print(f"Warning: Original message for session {session_id} not found on Discord, likely already deleted or too old.")
-    except Exception as e:
-        print(f"Error updating Discord message for expired session {session_id}: {e}")
+        pass
     finally:
         bot_module.ACTIVE_SESSIONS.pop(session_id, None)
     
@@ -388,7 +377,7 @@ async def receive_download_status(payload: DownloadStatusPayload):
     interaction = bot_module.ACTIVE_SESSIONS.get(session_id)
 
     if not interaction:
-        return {"status": "ignored", "message": "Session already handled or unknown."}
+        return {"status": "ignored"}
     
     try:
         original_message = await interaction.original_response()
@@ -400,7 +389,7 @@ async def receive_download_status(payload: DownloadStatusPayload):
                 description=f"{payload.message}",
                 color=discord.Color.teal()
             )
-        else: # status == "error"
+        else:
             new_embed = discord.Embed(
                 title="❌ Download Failed",
                 description=f"{payload.message}",
@@ -411,12 +400,8 @@ async def receive_download_status(payload: DownloadStatusPayload):
             new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
 
         await interaction.edit_original_response(embed=new_embed, view=None)
-        print(f"Session {session_id} download status received: {payload.status}. Discord message updated.")
-
     except discord.errors.NotFound:
-        print(f"Warning: Original message for session {session_id} not found on Discord.")
-    except Exception as e:
-        print(f"Error updating Discord message for download status {session_id}: {e}")
+        pass
     finally:
         bot_module.ACTIVE_SESSIONS.pop(session_id, None)
     
