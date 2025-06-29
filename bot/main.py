@@ -2,7 +2,8 @@ import asyncio
 import uvicorn
 import config
 from bot import bot
-from webhooks import app
+# **FIX**: Import app and the TMDB_CLIENT instance for shutdown
+from webhooks import app, TMDB_CLIENT
 
 async def run_services():
     """
@@ -26,4 +27,18 @@ if __name__ == "__main__":
     try:
         asyncio.run(run_services())
     except KeyboardInterrupt:
-        print("Shutting down services.")
+        print("Shutting down services due to KeyboardInterrupt.")
+    finally:
+        # **FIX**: Ensure the TMDB client's session is closed on shutdown.
+        # We need to run this cleanup in a new asyncio event loop
+        # as the previous one was closed by asyncio.run().
+        print("Closing TMDB client session...")
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(TMDB_CLIENT.close())
+            else:
+                asyncio.run(TMDB_CLIENT.close())
+            print("TMDB client session closed.")
+        except Exception as e:
+            print(f"Error closing TMDB client session: {e}")
