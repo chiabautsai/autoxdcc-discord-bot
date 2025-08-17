@@ -168,7 +168,7 @@ class SessionManager:
                                                          choices=[{"choice_id": c['choice_id'], "filename": c['filename'], "size": c['size']} for c in session.choices])
         elif session.type == 'hot':
             if not session.hot_items:
-                self.webhook_sender.send_hot_results(session.id, "no_results", message="The '!hot' command returned no items.")
+                self.webhook_sender.send_hot_results(session.id, "no_results", summary="The '!hot' command returned no items.")
             else:
                 self.webhook_sender.send_hot_results(session.id, "success", summary=session.hot_summary, 
                                                      items=[{"grabs": item['grabs'], "category": item['category'], "size": item['size'], "filename": item['filename']} for item in session.hot_items])
